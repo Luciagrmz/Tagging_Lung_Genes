@@ -1,7 +1,6 @@
-# Tagging_Lung_Genes
-#### Identifying gene mentions in text using Conditional Random Fields
-This repository contains the scripts and data generated to tag lung specific genes in a set of abstracts.
 
+# Identifying gene mentions in text using Conditional Random Fields
+This repository contains the scripts and data generated to tag lung specific genes in a set of abstracts.
 
 ## Getting Started
 -Principal Depend
