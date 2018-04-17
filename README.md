@@ -3,8 +3,7 @@
 This repository contains the scripts and data generated to tag lung specific genes in a set of abstracts.
 
 ## Getting Started
--Principal Depend
-- The repository is divided in four parts:
+The repository is divided in four parts:
     + Data-sets: contains both raw and processed data of 456 abstracts
     + Codes: scripts to process the data and training and testing of the model with the use of conditional random fields
       + It contains the three versions of the training and the script to evaluate the effect of each function
