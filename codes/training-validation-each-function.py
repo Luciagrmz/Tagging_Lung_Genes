@@ -1,0 +1,460 @@
+# -*- coding: UTF-8 -*-
+
+import os
+from itertools import chain
+from itertools import combinations
+from optparse import OptionParser
+from time import time
+from collections import Counter
+import re
+
+import nltk
+import sklearn
+import scipy.stats
+import sys
+
+from sklearn.externals import joblib
+from sklearn.metrics import make_scorer
+from sklearn.cross_validation import cross_val_score
+from sklearn.grid_search import RandomizedSearchCV
+
+import sklearn_crfsuite
+from sklearn_crfsuite import scorers
+from sklearn_crfsuite import metrics
+
+from nltk.corpus import stopwords
+
+
+# Objective
+# Training and evaluation of CRFs with sklearn-crfsuite.
+#
+# Input parameters
+# --inputPath=PATH    Path of training and test data set
+# --trainingFile        File with training data set
+# --testFile        File with test data set
+# --outputPath=PATH    Output path to place output files
+# --filteringStopWords   Filtering stop words
+# --excludeSymbols      Filtering punctuation marks
+
+# Output
+# 1) Best model
+
+# Examples
+# python3.4 training-validation-v1.py
+# --inputPath /export/space1/users/compu2/bionlp/conditional-random-fields/data-sets
+# --trainingFile training-data-set-70.txt
+# --testFile test-data-set-30.txt
+# --outputPath /export/space1/users/compu2/bionlp/conditional-random-fields
+# python3.4 training-validation-v1.py --inputPath /export/space1/users/compu2/bionlp/conditional-random-fields/data-sets --trainingFile training-data-set-70.txt --testFile test-data-set-30.txt --outputPath /export/space1/users/compu2/bionlp/conditional-random-fields
+
+#################################
+#           FUNCTIONS           #
+#################################
+def endsConLow(word):
+    miregex = re.compile(r'[^aeiouA-Z0-9]$')
+    if miregex.search(word):
+        return True
+    else:
+        return False
+
+def ShortAndUpperCase(word):
+    if len(word) <7 and re.search('[A-Z]', word):
+        return(True)
+    else:
+        return(False)
+
+def KeyWordCloseness(i, sent):
+    keywords={"alpha", "beta", "factor", "receptor", "protein", "enzyme","gene"}
+    indexes=[ index for index, word in enumerate(sent) if word in keywords] #retriving indexes of the keykord in the sentence
+    if len(indexes)!=0:
+        distances=[ abs(i-index) for index in indexes] #saves the distance from the word to every keyword
+        return (min(distances))
+    else:
+        return(1000)
+
+
+def word2features(sent, i):
+    listElem = sent[i].split('|')
+    word = listElem[0]
+    lemma = listElem[1]
+    postag = listElem[2]
+
+    wordlist = [ i.split('|')[0] for i in sent]
+
+    keywords={"alpha", "beta", "factor", "receptor", "protein", "enzyme"}
+    features = {
+        # Suffixes
+        'word[-3:]': word[-3:],
+        'word[-2:]': word[-2:],
+        'word[-1:]': word[-1:],
+        #'word.isupper()': word.isupper(),
+        'word': word,
+        'lemma': lemma,
+        'postag': postag,
+        'lemma[-3:]': lemma[-3:],
+        'lemma[-2:]': lemma[-2:],
+        'lemma[-1:]': lemma[-1:],
+        'word[:3]': word[:3],
+        'word[:2]': word[:2],
+        'word[:1]': word[:1],
+        'endsConLow()={}'.format(endsConLow(word)): endsConLow(word),
+        'HasHyphen':'-' in word, #1
+        'HasNumber':bool(re.search('\d', word)), #2
+        'UpperCase':bool(re.search('[A-Z]', word)), #3
+        'ShortAndUpperCase':ShortAndUpperCase(word), #4
+        'HasKeyword':word in keywords, #5
+        'AseEnd': bool(re.search('ases?\W*$', word)), #6
+        'InEnd': bool(re.search('in\W*$', word)), #7
+        'BNumEnd': bool(re.search('b-?\d+$', word)), #8
+        'InitUpper': bool(re.search("[A-Z] [a-z]*", word)), #9
+        'AllUpper': bool(re.search("^[A-Z]+$", word)), #10
+        'AlphaNumeric':bool(re.search("\w+", word)), #11
+        'RomanNum': bool(re.search("([ivxdlcm]+$|[IVXDLCM]+$)", word)), #12
+        'AllLower': bool(re.search("^[a-z]+$", word)), #13
+        'Letters': bool(re.search("^[A-Za-z]+$", word)), #14
+        'KeyWordCloseness': KeyWordCloseness(i, wordlist), #15
+        'word.istitle()': word.istitle(), #18
+        'word.isdigit()': word.isdigit(), #19
+    }
+    if i > 0:
+        listElem = sent[i - 1].split('|')
+        word1 = listElem[0]
+        lemma1 = listElem[1]
+        postag1 = listElem[2]
+        features.update({
+            '-1:word': word1, #20
+            '-1:lemma': lemma1, #21
+            '-1:postag': postag1, #22
+        })
+    
+
+    if i < len(sent) - 1:
+        listElem = sent[i + 1].split('|')
+        word1 = listElem[0]
+        lemma1 = listElem[1]
+        postag1 = listElem[2]
+        features.update({
+            '+1:word': word1, #23
+            '+1:lemma': lemma1, #24
+            '+1:postag': postag1, #25
+        })
+
+    '''    
+    if i > 1:
+        listElem = sent[i - 2].split('|')
+        word2 = listElem[0]
+        lemma2 = listElem[1]
+        postag2 = listElem[2]
+        features.update({
+            '-2:word': word2,
+            '-2:lemma': lemma2,
+        })
+
+    if i < len(sent) - 2:
+        listElem = sent[i + 2].split('|')
+        word2 = listElem[0]
+        lemma2 = listElem[1]
+        postag2 = listElem[2]
+        features.update({
+            '+2:word': word2,
+            '+2:lemma': lemma2,
+        })
+
+    trigrams = False
+    if trigrams:
+        if i > 2:
+            listElem = sent[i - 3].split('|')
+            word3 = listElem[0]
+            lemma3 = listElem[1]
+            postag3 = listElem[2]
+            features.update({
+                '-3:word': word3,
+                '-3:lemma': lemma3,
+            })
+
+        if i < len(sent) - 3:
+            listElem = sent[i + 3].split('|')
+            word3 = listElem[0]
+            lemma3 = listElem[1]
+            postag3 = listElem[2]
+            features.update({
+                '+3:word': word3,
+                '+3:lemma': lemma3,
+            })
+    '''
+    return features
+
+
+def sent2features(sent):
+    return [word2features(sent, i) for i in range(len(sent))]
+
+
+def sent2labels(sent):
+    return [elem.split('|')[3] for elem in sent]
+
+
+def sent2tokens(sent):
+    return [token for token, postag, label in sent]
+
+
+def print_transitions(trans_features, f):
+    for (label_from, label_to), weight in trans_features:
+        f.write("{:6} -> {:7} {:0.6f}\n".format(label_from, label_to, weight))
+
+
+def print_state_features(state_features, f):
+    for (attr, label), weight in state_features:
+        f.write("{:0.6f} {:8} {}\n".format(weight, label, attr.encode("utf-8")))
+
+
+__author__ = 'CMendezC'
+
+##########################################
+#               MAIN PROGRAM             #
+##########################################
+
+if __name__ == "__main__":
+    # Defining parameters
+    parser = OptionParser()
+    parser.add_option("--inputPath", dest="inputPath",
+                      help="Path of training data set", metavar="PATH")
+    parser.add_option("--outputPath", dest="outputPath",
+                      help="Output path to place output files",
+                      metavar="PATH")
+    parser.add_option("--trainingFile", dest="trainingFile",
+                      help="File with training data set", metavar="FILE")
+    parser.add_option("--testFile", dest="testFile",
+                      help="File with test data set", metavar="FILE")
+    parser.add_option("--excludeStopWords", default=False,
+                      action="store_true", dest="excludeStopWords",
+                      help="Exclude stop words")
+    parser.add_option("--excludeSymbols", default=False,
+                      action="store_true", dest="excludeSymbols",
+                      help="Exclude punctuation marks")
+
+    (options, args) = parser.parse_args()
+    if len(args) > 0:
+        parser.error("Any parameter given.")
+        sys.exit(1)
+
+    print('-------------------------------- PARAMETERS --------------------------------')
+    print("Path of training data set: " + options.inputPath)
+    print("File with training data set: " + str(options.trainingFile))
+    print("Path of test data set: " + options.inputPath)
+    print("File with test data set: " + str(options.testFile))
+    print("Exclude stop words: " + str(options.excludeStopWords))
+    symbols = ['.', ',', ':', ';', '?', '!', '\'', '"', '<', '>', '(', ')', '-', '_', '/', '\\', '¿', '¡', '+', '{',
+               '}', '[', ']', '*', '%', '$', '#', '&', '°', '`', '...']
+    #print("Exclude symbols " + str(symbols) + ': ' + str(options.excludeSymbols))
+    print("Exclude symbols: " + str(options.excludeSymbols))
+
+    print('-------------------------------- PROCESSING --------------------------------')
+    print('Reading corpus...')
+    t0 = time()
+
+    sentencesTrainingData = []
+    sentencesTestData = []
+
+    stopwords = [word for word in stopwords.words('english')]
+
+    with open(os.path.join(options.inputPath, options.trainingFile), "r") as iFile:
+        for line in iFile.readlines():
+            listLine = []
+            line = line.strip('\n')
+            for token in line.split():
+                if options.excludeStopWords:
+                    listToken = token.split('|')
+                    lemma = listToken[1]
+                    if lemma in stopwords:
+                        continue
+                if options.excludeSymbols:
+                    listToken = token.split('|')
+                    lemma = listToken[1]
+                    if lemma in symbols:
+                        continue
+                listLine.append(token)
+            sentencesTrainingData.append(listLine)
+        print("   Sentences training data: " + str(len(sentencesTrainingData)))
+
+    with open(os.path.join(options.inputPath, options.testFile), "r") as iFile:
+        for line in iFile.readlines():
+            listLine = []
+            line = line.strip('\n')
+            for token in line.split():
+                if options.excludeStopWords:
+                    listToken = token.split('|')
+                    lemma = listToken[1]
+                    if lemma in stopwords:
+                        continue
+                if options.excludeSymbols:
+                    listToken = token.split('|')
+                    lemma = listToken[1]
+                    if lemma in symbols:
+                        continue
+                listLine.append(token)
+            sentencesTestData.append(listLine)
+        print("   Sentences test data: " + str(len(sentencesTestData)))
+
+    print("Reading corpus done in: %fs" % (time() - t0))
+
+    print(sent2features(sentencesTrainingData[0])[0])
+    print(sent2features(sentencesTestData[0])[0])
+    t0 = time()
+
+    X_train = [sent2features(s) for s in sentencesTrainingData]
+    y_train = [sent2labels(s) for s in sentencesTrainingData]
+
+    X_test = [sent2features(s) for s in sentencesTestData]
+    # print X_test
+    y_test = [sent2labels(s) for s in sentencesTestData]
+
+    ######################## Iterations ###################################
+    FeatList=['HasHyphen','HasNumber','UpperCase','ShortAndUpperCase','HasKeyword','AseEnd','InEnd','BNumEnd','InitUpper','AllUpper','AlphaNumeric','RomanNum','AllLower','Letters','KeyWordCloseness','word.istitle()','word.isdigit()']      #X_train[0][0].keys()
+    #FeatList=['AseEnd','-1:postag','-1:word','HasKeyword','AllUpper','Letters','-1:lemma','+1:word','+1:lemma']
+    Parent_X_train=X_train
+    Parent_X_test=X_test
+
+    def GetFeatures(X_train, features): #Recieves an X-train like list and a list withthe features wanted
+        #It returns the object but with only the features in the list passed
+        base=['word[-3]','word[-2]','word[-1]','word','lemma','postag','lemma[-3]','lemma[-2]','lemma[-1]','word[3]','word[2]','word[1]','-1word','-1lemma','-1postag','+1word','+1lemma','+1postag']
+        return [ [{ feat:word[feat] for feat in word if feat in features or feat in base} for word in sent] for sent in X_train] 
+        """ Same code, more readable:
+        X_new=[]
+        for sent in X_train:
+            newsent=[]
+            for word in sent:
+                newword={ feat:word[feat] for feat in word if feat in features or feat in base}
+                newsent.append(newword)
+            X_new.append(newsent)
+        return X_new
+        """
+    j_iter=1
+    DicSize=[1]
+    with open("Combinations_tested.txt", "w") as ReportComb:
+        ReportComb.write("NumIter\tF-Score\tDicSize\tCombination\n")
+        for num in DicSize:
+            Combinations=combinations(FeatList, num)
+            for com in Combinations:
+                X_train=GetFeatures(X_train, com)
+                X_test=GetFeatures(X_test, com)
+
+                # Fixed parameters
+                # crf = sklearn_crfsuite.CRF(
+                #     algorithm='lbfgs',
+                #     c1=0.1,
+                #     c2=0.1,
+                #     max_iterations=100,
+                #     all_possible_transitions=True
+                # )
+
+                # Hyperparameter Optimization
+                crf = sklearn_crfsuite.CRF(
+                    algorithm='lbfgs',
+                    max_iterations=100,
+                    all_possible_transitions=True
+                )
+                params_space = {
+                    'c1': scipy.stats.expon(scale=0.5),
+                    'c2': scipy.stats.expon(scale=0.05),
+                }
+
+                # Original: labels = list(crf.classes_)
+                # Original: labels.remove('O')
+                labels = list(['GENE'])
+
+                # use the same metric for evaluation
+                f1_scorer = make_scorer(metrics.flat_f1_score,
+                                        average='weighted', labels=labels)
+
+                # search
+                rs = RandomizedSearchCV(crf, params_space,
+                                        cv=10,
+                                        verbose=3,
+                                        n_jobs=-1,
+                                        n_iter=20,
+                                        # n_iter=50,
+                                        scoring=f1_scorer)
+                rs.fit(X_train, y_train)
+
+                # Fixed parameters
+                # crf.fit(X_train, y_train)
+
+                # Best hiperparameters
+                # crf = rs.best_estimator_
+                nameReport = str(j_iter)+str(num)+'_'+options.trainingFile.replace('.txt', '.fStopWords_' + str(options.excludeStopWords) + '.fSymbols_' + str(
+                    options.excludeSymbols) + '-each-function.txt')
+                with open(os.path.join(options.outputPath, "reports", "report_" + nameReport ), mode="w") as oFile:
+                    oFile.write("********** TRAINING AND TESTING REPORT **********\n")
+                    oFile.write("Training file: " + options.trainingFile + '\n')
+                    oFile.write('\n')
+                    oFile.write('best params:' + str(rs.best_params_) + '\n')
+                    oFile.write('best CV score:' + str(rs.best_score_) + '\n')
+                    oFile.write('model size: {:0.2f}M\n'.format(rs.best_estimator_.size_ / 1000000))
+
+                print("Training done in: %fs" % (time() - t0))
+                t0 = time()
+
+                # Update best crf
+                crf = rs.best_estimator_
+
+                # Saving model
+                print("     Saving training model...")
+                t1 = time()
+                nameModel = str(j_iter)+str(num)+'_'+options.trainingFile.replace('.txt', '.fStopWords_' + str(options.excludeStopWords) + '.fSymbols_' + str(
+                    options.excludeSymbols) + '-each-function.mod')
+                joblib.dump(crf, os.path.join(options.outputPath, "models", nameModel))
+                print("        Saving training model done in: %fs" % (time() - t1))
+
+                # Evaluation against test data
+                y_pred = crf.predict(X_test)
+                print("*********************************")
+                name = str(j_iter)+str(num)+'_'+options.trainingFile.replace('.txt', '.fStopWords_' + str(options.excludeStopWords) + '.fSymbols_' + str(
+                    options.excludeSymbols) + '-each-function.txt')
+                with open(os.path.join(options.outputPath, "reports", "y_pred_" + name), "w") as oFile:
+                    for y in y_pred:
+                        oFile.write(str(y) + '\n')
+
+                print("*********************************")
+                name = str(j_iter)+str(num)+'_'+options.trainingFile.replace('.txt', '.fStopWords_' + str(options.excludeStopWords) + '.fSymbols_' + str(
+                    options.excludeSymbols) + '-each-function.txt')
+                with open(os.path.join(options.outputPath, "reports", "y_test_" + name), "w") as oFile:
+                    for y in y_test:
+                        oFile.write(str(y) + '\n')
+
+                print("Prediction done in: %fs" % (time() - t0))
+
+                # labels = list(crf.classes_)
+                # labels.remove('O')
+
+                with open(os.path.join(options.outputPath, "reports", "report_" + nameReport), mode="a") as oFile:
+                    oFile.write('\n')
+                    oFile.write("Flat F1: " + str(metrics.flat_f1_score(y_test, y_pred, average='weighted', labels=labels)))
+                    oFile.write('\n')
+                    # labels = list(crf.classes_)
+                    sorted_labels = sorted(
+                        labels,
+                        key=lambda name: (name[1:], name[0])
+                    )
+                    oFile.write(metrics.flat_classification_report(
+                        y_test, y_pred, labels=sorted_labels, digits=3
+                    ))
+                    oFile.write('\n')
+
+                    oFile.write("\nTop likely transitions:\n")
+                    print_transitions(Counter(crf.transition_features_).most_common(50), oFile)
+                    oFile.write('\n')
+
+                    oFile.write("\nTop unlikely transitions:\n")
+                    print_transitions(Counter(crf.transition_features_).most_common()[-50:], oFile)
+                    oFile.write('\n')
+
+                    oFile.write("\nTop positive:\n")
+                    print_state_features(Counter(crf.state_features_).most_common(200), oFile)
+                    oFile.write('\n')
+
+                    oFile.write("\nTop negative:\n")
+                    print_state_features(Counter(crf.state_features_).most_common()[-200:], oFile)
+                    oFile.write('\n')
+
+                ReportComb.write(str(j_iter)+'\t'+str(metrics.flat_f1_score(y_test, y_pred, average='weighted', labels=labels))+'\t'+str(num)+'\t'+str(com)+'\n')
+                j_iter+=1
